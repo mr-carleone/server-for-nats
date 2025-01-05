@@ -6,6 +6,37 @@ import nats
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from loguru import logger
+
+# Логгер с паттерном Singleton
+class SingletonMeta(type):
+    _instances = {}
+
+    def __call__(cls, *args, **kwargs):
+        if cls not in cls._instances:
+            instance = super().__call__(*args, **kwargs)
+            cls._instances[cls] = instance
+        return cls._instances[cls]
+
+class Logger(metaclass=SingletonMeta):
+    def __init__(self):
+        logger.add("logs/file_{time}.log", rotation="50 MB")  # Логирование в файл
+        logger.add(lambda msg: print(msg), colorize=True, format="<green>{time}</green> <level>{message}</level>")  # Логирование в консоль
+
+    def info(self, message):
+        logger.info(message)
+
+    def error(self, message):
+        logger.error(message)
+
+    def debug(self, message):
+        logger.debug(message)
+
+    def warning(self, message):
+        logger.warning(message)
+
+# Инициализация логгера
+log = Logger()
 
 app = FastAPI()
 
@@ -55,20 +86,46 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.post("/send")
 async def send_message(message: dict):
     nc = await nats.connect("nats://localhost:4222")
-    await nc.publish("my_subject", json.dumps(message).encode())
+    js = nc.jetstream()
+    await js.add_stream(name="MY_STREAM", subjects=["my_subject"])
+    await js.publish("my_subject", json.dumps(message).encode())
     await nc.close()
     return {"status": "Message sent"}
 
+@app.get("/message_count")
+async def get_message_count():
+    nc = await nats.connect("nats://localhost:4222")
+    js = nc.jetstream()
+    stream_info = await js.stream_info("MY_STREAM")
+    await nc.close()
+    return {"count": stream_info.state.messages}
+
 async def nats_listener(nc):
+    js = nc.jetstream()
     async def message_handler(msg):
         data = msg.data.decode()
+        parsed_data = json.loads(data)
+        log.info(f"Received message from broker: {parsed_data['message']}")
         await manager.broadcast(data)
 
-    await nc.subscribe("my_subject", cb=message_handler)
+    try:
+        await js.subscribe("my_subject", cb=message_handler)
+    except nats.js.errors.NotFoundError:
+        log.error("Stream or subject not found. Ensure the stream is created and the subject is correct.")
+    except Exception as e:
+        log.error(f"An error occurred: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     nc = await nats.connect("nats://localhost:4222")
+    js = nc.jetstream()
+
+    # Создаем поток, если он не существует
+    try:
+        await js.add_stream(name="MY_STREAM", subjects=["my_subject"])
+    except nats.js.errors.StreamNameAlreadyInUseError:
+        pass  # Поток уже существует
+
     asyncio.create_task(nats_listener(nc))
     yield
     await nc.close()
