@@ -104,9 +104,17 @@ async def nats_listener(nc):
     js = nc.jetstream()
     async def message_handler(msg):
         data = msg.data.decode()
-        parsed_data = json.loads(data)
-        log.info(f"Received message from broker: {parsed_data['message']}")
-        await manager.broadcast(data)
+        try:
+            parsed_data = json.loads(data)
+            if 'message' in parsed_data:
+                log.info(f"Received message from broker: {parsed_data['message']}")
+            else:
+                log.warning(f"Received message without 'message' key: {parsed_data}")
+            await manager.broadcast(data)
+        except json.JSONDecodeError:
+            log.error(f"Failed to decode JSON: {data}")
+        except Exception as e:
+            log.error(f"An error occurred: {e}")
 
     try:
         await js.subscribe("my_subject", cb=message_handler)
@@ -114,6 +122,7 @@ async def nats_listener(nc):
         log.error("Stream or subject not found. Ensure the stream is created and the subject is correct.")
     except Exception as e:
         log.error(f"An error occurred: {e}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
